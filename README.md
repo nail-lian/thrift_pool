@@ -1,4 +1,4 @@
 thrift_pool
-===========
+=========
 
-A Thrift connection pool for Erlang.
+A connection pool manager for Thrift connections in erlang.
