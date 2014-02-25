@@ -45,7 +45,8 @@
                   reconn_max,
                   reconn_time,
                   op_cnt_dict,
-                  op_time_dict } ).
+                  op_time_dict,
+                  retries } ).
 
 %%====================================================================
 %% API
@@ -85,6 +86,8 @@ get_and_reset_stats( Pid ) ->
 %%--------------------------------------------------------------------
 init( [ Host, Port, TSvc, TOpts, ReconnMin, ReconnMax ] ) ->
   process_flag( trap_exit, true ),
+  
+  {ok, Retries} = application:get_env(thrift_pool, retries),
 
   State = #state{ host         = Host,
                   port         = Port,
@@ -93,7 +96,8 @@ init( [ Host, Port, TSvc, TOpts, ReconnMin, ReconnMax ] ) ->
                   reconn_min   = ReconnMin,
                   reconn_max   = ReconnMax,
                   op_cnt_dict  = dict:new(),
-                  op_time_dict = dict:new() },
+                  op_time_dict = dict:new(),
+                  retries      = Retries },
 
   { ok, try_connect( State ) }.
 
@@ -113,23 +117,10 @@ handle_call( { call, Op, _ },
 
 handle_call( { call, Op, Args },
              _From,
-             State=#state{ client = Client } ) ->
+             State=#state{ retries = Retries } ) ->
 
-  Start = now(),
-  Result = ( catch thrift_client:call( Client, Op, Args) ),
-  Time = timer:now_diff( now(), Start ),
-
-  case Result of
-    { C, { ok, Reply } } ->
-      S = incr_stats( Op, "success", Time, State#state{ client = C } ),
-      { reply, {ok, Reply }, S };
-    { _, { E, Msg } } when E == error; E == exception ->
-      S = incr_stats( Op, "error", Time, try_connect( State ) ),
-      { reply, { E, Msg }, S };
-    Other ->
-      S = incr_stats( Op, "error", Time, try_connect( State ) ),
-      { reply, Other, S }
-  end;
+  {Result, S}  = send_call(Op, Args, State, Retries),
+  { reply, Result, S };
 
 handle_call( get_stats,
              _From,
@@ -180,22 +171,62 @@ code_change( _OldVsn, State, _Extra ) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
+send_call(Op, Args, State = #state{ client = Client }, Count) when Count > 10->
+  Start = now(),
+  Result = ( catch thrift_client:call( Client, Op, Args) ),
+  Time = timer:now_diff( now(), Start ),
+
+  case Result of
+    { C, { ok, Reply } } ->
+      S = incr_stats( Op, "success", Time, State#state{ client = C } ),
+      { {ok, Reply }, S };
+    { _, { E, _Msg } } when E == error; E == exception ->
+      S = incr_stats( Op, "error", Time, try_connect( State ) ),
+      send_call(Op, Args, S, (Count - 1));
+    _Other ->
+      S = incr_stats( Op, "error", Time, try_connect( State ) ),
+      send_call(Op, Args, S, (Count - 1))
+  end;
+send_call(Op, Args, State = #state{ client = Client }, _Count) ->
+  Start = now(),
+  Result = ( catch thrift_client:call( Client, Op, Args) ),
+  Time = timer:now_diff( now(), Start ),
+
+  case Result of
+    { C, { ok, Reply } } ->
+      S = incr_stats( Op, "success", Time, State#state{ client = C } ),
+      { {ok, Reply }, S };
+    { _, { E, Msg } } when E == error; E == exception ->
+      S = incr_stats( Op, "error", Time, try_connect( State ) ),
+      { {E, Msg}, S }; 
+    Other ->
+      S = incr_stats( Op, "error", Time, try_connect( State ) ),
+      { Other, S }
+  end.
+
 try_connect( State = #state{ client      = OldClient,
                              host        = Host,
                              port        = Port,
                              thrift_svc  = TSvc,
                              thrift_opts = TOpts } ) ->
 
-  case OldClient of
-    nil -> ok;
-    _   -> ( catch thrift_client:close( OldClient ) )
+  io:format("Trying to connect\n"),
+        case OldClient of
+    nil -> io:format("New connection\n"), ok;
+    _   -> io:format("Old connection\n"), ( catch thrift_client:close( OldClient ) )
   end,
 
   case catch thrift_client_util:new( Host, Port, TSvc, TOpts ) of
     { ok, Client } ->
+        io:format("Connected\n"),
       State#state{ client = Client, reconn_time = 0 };
     { E, Msg } when E == error; E == exception ->
+        io:format("Error connecting: "),
+        io:format(Msg),
+
       ReconnTime = reconn_time( State ),
+        io:format("\nReconn Time: "),
+        io:format(ReconnTime),
       error_logger:error_msg( "[~w] ~w connect failed (~w), trying again in ~w ms~n",
                               [ self(), TSvc, Msg, ReconnTime ] ),
       erlang:send_after( ReconnTime, self(), try_connect ),
