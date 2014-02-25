@@ -171,7 +171,7 @@ code_change( _OldVsn, State, _Extra ) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
-send_call(Op, Args, State = #state{ client = Client }, Count) when Count > 10->
+send_call(Op, Args, State = #state{ client = Client }, Count) when Count > 0 ->
   Start = now(),
   Result = ( catch thrift_client:call( Client, Op, Args) ),
   Time = timer:now_diff( now(), Start ),
