@@ -99,7 +99,13 @@ init( [ Host, Port, TSvc, TOpts, ReconnMin, ReconnMax ] ) ->
                   op_time_dict = dict:new(),
                   retries      = Retries },
 
-  { ok, try_connect( State ) }.
+    Thrift_state = try try_connect( State ) of
+        St -> St
+    catch
+        _ -> State
+    end,
+
+  { ok, Thrift_state }.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
