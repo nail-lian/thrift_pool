@@ -210,27 +210,26 @@ try_connect( State = #state{ client      = OldClient,
                              thrift_svc  = TSvc,
                              thrift_opts = TOpts } ) ->
 
-  io:format("Trying to connect\n"),
-        case OldClient of
-    nil -> io:format("New connection\n"), ok;
-    _   -> io:format("Old connection\n"), ( catch thrift_client:close( OldClient ) )
+  case OldClient of
+    nil -> ok;
+    _   -> ( catch thrift_client:close( OldClient ) )
   end,
 
   case catch thrift_client_util:new( Host, Port, TSvc, TOpts ) of
     { ok, Client } ->
-        io:format("Connected\n"),
       State#state{ client = Client, reconn_time = 0 };
     { E, Msg } when E == error; E == exception ->
-        io:format("Error connecting: "),
-        io:format(Msg),
-
-      ReconnTime = reconn_time( State ),
-        io:format("\nReconn Time: "),
-        io:format(ReconnTime),
-      error_logger:error_msg( "[~w] ~w connect failed (~w), trying again in ~w ms~n",
+        case reconn_time( State ) of
+            error ->
+                error_logger:error_msg( "[~w] ~w connect failed (~w). ~n",
+                              [ self(), TSvc, Msg] ),
+                State#state{ client = nil, reconn_time = 0 };
+            ReconnTime ->
+                error_logger:error_msg( "[~w] ~w connect failed (~w), trying again in ~w ms~n",
                               [ self(), TSvc, Msg, ReconnTime ] ),
-      erlang:send_after( ReconnTime, self(), try_connect ),
-      State#state{ client = nil, reconn_time = ReconnTime }
+                erlang:send_after( ReconnTime, self(), try_connect ),
+                State#state{ client = nil, reconn_time = ReconnTime }
+        end
   end.
 
 
@@ -241,7 +240,7 @@ reconn_time( #state{ reconn_max = ReconnMax, reconn_time = ReconnMax } ) ->
 reconn_time( #state{ reconn_max = ReconnMax, reconn_time = R } ) ->
   Backoff = 2 * R,
   case Backoff > ReconnMax of
-    true  -> ReconnMax;
+    true  -> error;
     false -> Backoff
   end.
 
