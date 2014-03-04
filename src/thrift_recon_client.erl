@@ -65,7 +65,7 @@ start_link( [Host, Port,
                          [] ).
 
 call( Pid, Op, Args ) ->
-  gen_server:call( Pid, { call, Op, Args } ).
+  gen_server:call( Pid, { call, Op, Args }, infinity ).
 
 get_stats( Pid ) ->
   gen_server:call( Pid, get_stats ).

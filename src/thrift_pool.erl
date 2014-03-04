@@ -104,11 +104,11 @@ delete_pool(PoolName) ->
 call(PoolName, Function, Args)
   when is_atom(Function), is_list(Args) ->
     poolboy:transaction(PoolName, fun(Worker) ->
-                                            thrift_reconnecting_client:call(Worker, Function, Args)
+                                            thrift_recon_client:call(Worker, Function, Args)
                                     end, ?TIMEOUT).
 
 call(PoolName, Function, Args, Timeout)
   when is_atom(Function), is_list(Args), is_integer(Timeout) ->
     poolboy:transaction(PoolName, fun(Worker) ->
-                                            thrift_reconnecting_client:call(Worker, Function, Args)
+                                            thrift_recon_client:call(Worker, Function, Args)
                                     end, Timeout).
