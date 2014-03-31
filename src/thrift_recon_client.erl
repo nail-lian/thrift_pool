@@ -22,9 +22,7 @@
 -behaviour(gen_server).
 
 %% API
--export([ call/3,
-          get_stats/1,
-          get_and_reset_stats/1 ]).
+-export([ call/3 ]).
 
 -export([ start_link/1 ]).
 
@@ -36,17 +34,15 @@
           terminate/2,
           code_change/3 ]).
 
--record( state, { client = nil, 
+-record( state, {  
                   host,
                   port,
                   thrift_svc,
                   thrift_opts,
                   reconn_min,
                   reconn_max,
-                  reconn_time,
-                  op_cnt_dict,
-                  op_time_dict,
-                  retries } ).
+                  reconn_time
+                } ).
 
 %%====================================================================
 %% API
@@ -67,12 +63,6 @@ start_link( [Host, Port,
 call( Pid, Op, Args ) ->
   gen_server:call( Pid, { call, Op, Args }, infinity ).
 
-get_stats( Pid ) ->
-  gen_server:call( Pid, get_stats ).
-
-get_and_reset_stats( Pid ) ->
-  gen_server:call( Pid, get_and_reset_stats ).
-
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
@@ -87,25 +77,15 @@ get_and_reset_stats( Pid ) ->
 init( [ Host, Port, TSvc, TOpts, ReconnMin, ReconnMax ] ) ->
   process_flag( trap_exit, true ),
   
-  {ok, Retries} = application:get_env(thrift_pool, retries),
-
   State = #state{ host         = Host,
                   port         = Port,
                   thrift_svc   = TSvc,
                   thrift_opts  = TOpts,
                   reconn_min   = ReconnMin,
-                  reconn_max   = ReconnMax,
-                  op_cnt_dict  = dict:new(),
-                  op_time_dict = dict:new(),
-                  retries      = Retries },
+                  reconn_max   = ReconnMax
+                },
 
-    Thrift_state = try try_connect( State ) of
-        St -> St
-    catch
-        _ -> State
-    end,
-
-  { ok, Thrift_state }.
+  { ok, State }.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
@@ -116,27 +96,12 @@ init( [ Host, Port, TSvc, TOpts, ReconnMin, ReconnMax ] ) ->
 %%                                                   {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
-handle_call( { call, Op, _ },
-             _From,
-             State = #state{ client = nil } ) ->
-  { reply, { error, noconn }, incr_stats( Op, "failfast", 1, State ) };
-
 handle_call( { call, Op, Args },
              _From,
-             State=#state{ retries = Retries } ) ->
+             State) ->
 
-  {Result, S}  = send_call(Op, Args, State, Retries),
-  { reply, Result, S };
-
-handle_call( get_stats,
-             _From,
-             State = #state{} ) ->
-  { reply, stats( State ), State };
-
-handle_call( get_and_reset_stats,
-             _From,
-             State = #state{} ) ->
-  { reply, stats( State ), reset_stats( State ) }.
+  {Result, S}  = send_call(Op, Args, State),
+  { reply, Result, S }.
 
 %%--------------------------------------------------------------------
 %% Function: handle_cast(Msg, State) -> {noreply, State} |
@@ -163,8 +128,7 @@ handle_info( _Info, State ) ->
 %% cleaning up. When it returns, the gen_server terminates with Reason.
 %% The return value is ignored.
 %%--------------------------------------------------------------------
-terminate( _Reason, #state{ client = Client } ) ->
-  thrift_client:close( Client ),
+terminate( _Reason, _State) ->
   ok.
 
 %%--------------------------------------------------------------------
@@ -177,100 +141,24 @@ code_change( _OldVsn, State, _Extra ) ->
 %%--------------------------------------------------------------------
 %%% Internal functions
 %%--------------------------------------------------------------------
-send_call(Op, Args, State = #state{ client = Client }, Count) when Count > 0 ->
-  Start = now(),
-  Result = ( catch thrift_client:call( Client, Op, Args) ),
-  Time = timer:now_diff( now(), Start ),
-
-  case Result of
-    { C, { ok, Reply } } ->
-      S = incr_stats( Op, "success", Time, State#state{ client = C } ),
-      { {ok, Reply }, S };
-    { _, { E, _Msg } } when E == error; E == exception ->
-      S = incr_stats( Op, "error", Time, try_connect( State ) ),
-      send_call(Op, Args, S, (Count - 1));
-    _Other ->
-      S = incr_stats( Op, "error", Time, try_connect( State ) ),
-      send_call(Op, Args, S, (Count - 1))
-  end;
-send_call(Op, Args, State = #state{ client = Client }, _Count) ->
-  Start = now(),
-  Result = ( catch thrift_client:call( Client, Op, Args) ),
-  Time = timer:now_diff( now(), Start ),
-
-  case Result of
-    { C, { ok, Reply } } ->
-      S = incr_stats( Op, "success", Time, State#state{ client = C } ),
-      { {ok, Reply }, S };
-    { _, { E, Msg } } when E == error; E == exception ->
-      S = incr_stats( Op, "error", Time, try_connect( State ) ),
-      { {E, Msg}, S }; 
-    Other ->
-      S = incr_stats( Op, "error", Time, try_connect( State ) ),
-      { Other, S }
-  end.
-
-try_connect( State = #state{ client      = OldClient,
+send_call(Op, Args, State = #state{
                              host        = Host,
                              port        = Port,
                              thrift_svc  = TSvc,
-                             thrift_opts = TOpts } ) ->
+                             thrift_opts = TOpts
+			    }) ->
+  {ok, New_Client} = (catch thrift_client_util:new( Host, Port, TSvc, TOpts )),
+  Result = ( catch thrift_client:call( New_Client, Op, Args) ),
 
-  case OldClient of
-    nil -> ok;
-    _   -> ( catch thrift_client:close( OldClient ) )
-  end,
 
-  case catch thrift_client_util:new( Host, Port, TSvc, TOpts ) of
-    { ok, Client } ->
-      State#state{ client = Client, reconn_time = 0 };
-    { E, Msg } when E == error; E == exception ->
-        case reconn_time( State ) of
-            error ->
-                error_logger:error_msg( "[~w] ~w connect failed (~w). ~n",
-                              [ self(), TSvc, Msg] ),
-                State#state{ client = nil, reconn_time = 0 };
-            ReconnTime ->
-                error_logger:error_msg( "[~w] ~w connect failed (~w), trying again in ~w ms~n",
-                              [ self(), TSvc, Msg, ReconnTime ] ),
-                erlang:send_after( ReconnTime, self(), try_connect ),
-                State#state{ client = nil, reconn_time = ReconnTime }
-        end
+  case Result of
+    { C, { ok, Reply } } ->
+      ( catch thrift_client:close( C ) ),
+      { {ok, Reply }, State };
+    { C, { E, _Msg } } when E == error; E == exception ->
+      ( catch thrift_client:close( C ) ),
+      send_call(Op, Args, State);
+    _Other ->
+      ( catch thrift_client:close( New_Client ) ),
+      send_call(Op, Args, State)
   end.
-
-
-reconn_time( #state{ reconn_min = ReconnMin, reconn_time = 0 } ) ->
-  ReconnMin;
-reconn_time( #state{ reconn_max = ReconnMax, reconn_time = ReconnMax } ) ->
-  ReconnMax;
-reconn_time( #state{ reconn_max = ReconnMax, reconn_time = R } ) ->
-  Backoff = 2 * R,
-  case Backoff > ReconnMax of
-    true  -> error;
-    false -> Backoff
-  end.
-
-
-incr_stats( Op, Result, Time,
-            State = #state{ op_cnt_dict  = OpCntDict,
-                            op_time_dict = OpTimeDict } ) ->
-  Key = lists:flatten( [ atom_to_list( Op ), [ "_" | Result ] ] ),
-  State#state{ op_cnt_dict  = dict:update_counter( Key, 1, OpCntDict ),
-               op_time_dict = dict:update_counter( Key, Time, OpTimeDict ) }.
-
-
-stats( #state{ thrift_svc   = TSvc,
-               op_cnt_dict  = OpCntDict,
-               op_time_dict = OpTimeDict } ) ->
-  Svc = atom_to_list(TSvc),
-
-  F = fun( Key, Count, Stats ) ->
-        Name = lists:flatten( [ Svc, [ "_" | Key ] ] ),
-        Micros = dict:fetch( Key, OpTimeDict ),
-        [ { Name, Count, Micros } | Stats ]
-      end,
-
-  dict:fold( F, [], OpCntDict ).
-
-reset_stats( State = #state{} ) ->
-  State#state{ op_cnt_dict = dict:new(), op_time_dict = dict:new() }.
